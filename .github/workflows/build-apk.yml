@@ -1,0 +1,67 @@
+name: Build APK
+
+# Runs on every push to main, or by hand from the Actions tab ("Run workflow").
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # to publish the APK on the "latest" release
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: voice-automation   # the project lives in this folder
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install the Android NDK and CMake
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;27.0.12077973" "cmake;3.22.1" > /dev/null
+
+      - name: Download the Cactus engine and models
+        run: |
+          pip install cactus-needle
+          needle build --platform android-arm64 --out needle-android
+          needle download whistle --out whistle
+          mkdir -p app/src/main/cpp/cactus/arm64-v8a app/src/main/cpp/cactus/include app/src/main/assets/models
+          cp needle-android/libneedle.a app/src/main/cpp/cactus/arm64-v8a/
+          cp needle-android/needle.h app/src/main/cpp/cactus/include/
+          cp needle-android/needle3.cact app/src/main/assets/models/
+          cp "$(find whistle -name 'whistle.cact' | head -1)" app/src/main/assets/models/
+          echo "Engine folder:"; ls -la needle-android
+          echo "Bundled models:"; ls -la app/src/main/assets/models
+
+      - name: Build the APK
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Keep the APK as a build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VoiceAutomation-apk
+          path: voice-automation/app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Publish it on the "latest" release (direct download on the phone)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk VoiceAutomation.apk
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest VoiceAutomation.apk \
+            --title "Latest test build" \
+            --notes "Test build from commit ${GITHUB_SHA::7}. On the phone: download VoiceAutomation.apk, open it, allow installing from this source." \
+            --prerelease
